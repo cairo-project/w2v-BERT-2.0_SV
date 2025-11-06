@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "w2vbert-speaker"
+version = "0.1.0"
+description = "Speaker embedding inference module built on top of W2V-BERT"
+readme = "README.md"
+authors = [{name = "Voice Bio Eval Team"}]
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.1",
+    "transformers>=4.38",
+    "peft>=0.8",
+    "safetensors>=0.4",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"w2vbert_speaker" = ["data/*.json"]

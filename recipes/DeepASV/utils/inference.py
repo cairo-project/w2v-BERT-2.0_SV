@@ -1,7 +1,7 @@
 import os
 import sys
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 import torch
 from deeplab.utils.fileio import read_hyperyaml
@@ -36,10 +36,36 @@ for _toolkit_path in _possible_toolkit_roots:
 
 
 _DEFAULT_CONFIG = _PROJECT_ROOT / "recipes/DeepASV/conf/w2v-bert/s3.yaml"
-_DEFAULT_CHECKPOINT = (
-    _PROJECT_ROOT
-    / "deeplab/pretrained/audio2vector/ckpts/facebook/w2v-bert-2.0/model_lmft_0.14.pth"
+_CKPT_RELATIVE_PATH = Path(
+    "audio2vector/ckpts/facebook/w2v-bert-2.0/model_lmft_0.14.pth"
 )
+
+
+def _build_checkpoint_candidates() -> Tuple[Path, ...]:
+    """Return possible locations for the pre-trained checkpoint."""
+    base_dirs = [
+        _PROJECT_ROOT / "deeplab/pretrained",
+        _PROJECT_ROOT / "pretrained",
+        _PROJECT_ROOT.parent / "pretrained",
+    ]
+    candidates: list[Path] = []
+    for base in base_dirs:
+        candidate = (base / _CKPT_RELATIVE_PATH).resolve()
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return tuple(candidates)
+
+
+CHECKPOINT_CANDIDATES = _build_checkpoint_candidates()
+_DEFAULT_CHECKPOINT = next(
+    (candidate for candidate in CHECKPOINT_CANDIDATES if candidate.exists()),
+    CHECKPOINT_CANDIDATES[0],
+)
+
+
+def get_checkpoint_candidates() -> Tuple[Path, ...]:
+    """Expose checkpoint search paths for external tooling."""
+    return CHECKPOINT_CANDIDATES
 
 
 class W2VBERT_SPK_Module(torch.nn.Module):

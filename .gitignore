@@ -4,3 +4,4 @@ __pycache__
 *.pth
 .safetensors
 *.egg-info
+artifacts/

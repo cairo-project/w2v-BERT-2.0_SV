@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import subprocess
+import importlib
 from pathlib import Path
 from typing import Dict, Iterable, Tuple
 
@@ -17,20 +19,6 @@ def find_repo_root(start: Path) -> Path:
         if (candidate / "recipes").exists() and (candidate / "deeplab").exists():
             return candidate
     raise RuntimeError("Unable to locate the repository root. Run the script from inside the repo.")
-
-
-def extend_sys_path(repo_root: Path) -> None:
-    additions = [
-        repo_root / "packages/w2vbert_speaker/src",
-        repo_root / "recipes/DeepASV",
-        repo_root / "deeplab/pretrained/audio2vector/module/transformers/src",
-        repo_root,
-    ]
-    for candidate in additions:
-        if candidate.exists():
-            resolved = str(candidate)
-            if resolved not in sys.path:
-                sys.path.insert(0, resolved)
 
 
 def resolve_checkpoint(repo_root: Path, override: Path | None) -> Path:
@@ -84,9 +72,19 @@ def parse_args() -> argparse.Namespace:
         help="Length of the synthetic waveform (in seconds) used for tracing.",
     )
     parser.add_argument(
+        "--preprocess",
+        action="store_true",
+        help="Precompute feature-extractor outputs and export a scripted module that accepts precomputed features (avoids tracing numpy conversion).",
+    )
+    parser.add_argument(
         "--strict-load",
         action="store_true",
         help="Use strict=True when loading checkpoint weights.",
+    )
+    parser.add_argument(
+        "--install-package",
+        action="store_true",
+        help="If the package is not importable, attempt `pip install -e packages/w2vbert_speaker` into the current env.",
     )
     return parser.parse_args()
 
@@ -136,7 +134,31 @@ def main() -> None:
     args = parse_args()
     script_path = Path(__file__).resolve()
     repo_root = find_repo_root(script_path)
-    extend_sys_path(repo_root)
+
+    # Prefer the package to be installed in the active environment. Try importing
+    # the public module first; if it fails and --install-package is set, install
+    # the local package in editable mode and retry. Only fall back to modifying
+    # sys.path when neither approach succeeds.
+    try:
+        importlib.import_module("w2vbert_speaker.module")
+    except Exception:
+        if args.install_package:
+            pkg_path = (repo_root / "packages" / "w2vbert_speaker").resolve()
+            print(f"Package not importable; attempting to pip install -e {pkg_path}")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-e", str(pkg_path)])
+            importlib.invalidate_caches()
+            try:
+                importlib.import_module("w2vbert_speaker.module")
+            except Exception as exc:  # pragma: no cover - environment install failed
+                raise RuntimeError(f"Failed to import w2vbert_speaker after installation: {exc}")
+        else:
+            # Do not modify sys.path as a runtime fallback. Require the package to be
+            # importable or ask the user to run the installer. Fail fast to avoid
+            # hidden behavior in CI or production environments.
+            raise RuntimeError(
+                "Package 'w2vbert_speaker' is not importable. "
+                "Install it (e.g. `pip install -e packages/w2vbert_speaker`) or rerun with --install-package to attempt installation."
+            )
 
     from w2vbert_speaker.module import W2VBERT_SPK_Module
 
@@ -215,23 +237,111 @@ def main() -> None:
     module.load_model(ckpt_path=checkpoint, strict=args.strict_load)
     module.eval()
 
+    # If present, save the feature-extractor next to the artifact so runtimes can
+    # load it without constructing the full eager module. This stores only the
+    # preprocessing config (no model weights).
+    try:
+        spk_front = module.modules_dict.get("spk_model").front
+    except Exception:
+        spk_front = None
+    feature_extractor_dir = None
+    if spk_front is not None:
+        fe = getattr(spk_front, "feature_extractor", None)
+        if fe is not None:
+            feature_extractor_dir = output_path.parent / "feature_extractor"
+            feature_extractor_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                fe.save_pretrained(str(feature_extractor_dir))
+                print(f"Saved feature_extractor to: {feature_extractor_dir}")
+            except Exception as exc:
+                print(f"Warning: failed to save feature_extractor: {exc}")
+
     sample_rate = determine_sample_rate(module)
     num_samples = max(int(sample_rate * args.example_seconds), sample_rate)
     example = torch.zeros(1, num_samples, dtype=torch.float32, device=module.device)
 
-    with torch.inference_mode():
-        reference = module(example)
+    if args.preprocess:
+        # Precompute feature extractor outputs for the example waveform and
+        # export a wrapper that accepts precomputed input_features tensors.
+        front = module.modules_dict["spk_model"].front
+        # feature_extractor expects numpy inputs; run it once now (outside trace).
+        # If NumPy is not available in this environment, give a clear error
+        # with instructions to install it. Converting torch tensors to numpy
+        # requires NumPy.
+        try:
+            import numpy as _np  # noqa: F401
+        except Exception as exc:  # pragma: no cover - environment missing numpy
+            raise RuntimeError(
+                "Preprocessing requires NumPy but it is not available in this Python environment. "
+                f"Install it and retry, e.g. `{sys.executable} -m pip install numpy`, or run the exporter without --preprocess. "
+                "(The --preprocess path runs the Hugging Face feature extractor which currently expects NumPy inputs.)"
+            ) from exc
 
-    # Try to use torch.jit.script (preferred) which preserves control flow and
-    # avoids the tracer issues around converting tensors to NumPy. If scripting
-    # fails (many third-party libs are not scriptable), fall back to tracing.
-    try:
-        scripted = torch.jit.script(module)
-        print("Exported model using torch.jit.script")
-    except Exception as exc:  # pragma: no cover - fallback
-        print(f"torch.jit.script failed: {exc}; falling back to torch.jit.trace")
-        scripted = torch.jit.trace(module, example, strict=False)
-    scripted = scripted.cpu()
+        # safe to convert to numpy now
+        example_np = example.cpu().numpy()
+        features = front.feature_extractor(example_np, sampling_rate=sample_rate, return_tensors="pt", padding=False, truncation=False, return_attention_mask=False)
+        input_features = features["input_features"].to(dtype=next(module.parameters()).dtype)
+
+        class FeatureWrapper(torch.nn.Module):
+            def __init__(self, spk_model):
+                super().__init__()
+                self.encoder = spk_model.front.encoder
+                self.n_mfa_layers = spk_model.n_mfa_layers
+                self.adapter_layers = spk_model.adapter_layers
+                self.pooling = spk_model.pooling
+                self.bottleneck = spk_model.bottleneck
+                self.drop = spk_model.drop
+
+            def forward(self, input_features_tensor: torch.Tensor) -> torch.Tensor:
+                # input_features_tensor: [batch, seq_len, feat_dim]
+                x = self.encoder.feature_projection(input_features_tensor)[0]
+                hidden_states = [x]
+                for layer in self.encoder.encoder.layers:
+                    x = layer(x)[0]
+                    hidden_states.append(x)
+
+                if self.n_mfa_layers == 1:
+                    hidden = hidden_states[-1]
+                else:
+                    hidden_states_slice = hidden_states[-self.n_mfa_layers :]
+                    projected = [layer(h) for layer, h in zip(self.adapter_layers, hidden_states_slice)]
+                    hidden = torch.cat(projected, dim=-1)
+
+                pooled = self.pooling(hidden)
+                if self.drop is not None:
+                    pooled = self.drop(pooled)
+                return self.bottleneck(pooled)
+
+        wrapper = FeatureWrapper(module.modules_dict["spk_model"]).eval()
+        # Probe reference embedding by running wrapper on example input_features
+        with torch.inference_mode():
+            reference = wrapper(input_features)
+
+        try:
+            scripted = torch.jit.script(wrapper)
+            print("Exported feature-wrapper using torch.jit.script")
+        except Exception:
+            scripted = torch.jit.trace(wrapper, input_features, strict=False)
+            print("Exported feature-wrapper using torch.jit.trace")
+
+        scripted = scripted.cpu()
+        # adjust output artifact name to indicate preprocessed interface
+        output_path = output_path.with_name(output_path.stem + "_preprocessed" + output_path.suffix)
+        preprocessed_flag = True
+    else:
+        with torch.inference_mode():
+            reference = module(example)
+
+        # Try to use torch.jit.script (preferred) which preserves control flow and
+        # avoids the tracer issues around converting tensors to NumPy. If scripting
+        # fails (many third-party libs are not scriptable), fall back to tracing.
+        try:
+            scripted = torch.jit.script(module)
+            print("Exported model using torch.jit.script")
+        except Exception as exc:  # pragma: no cover - fallback
+            print(f"torch.jit.script failed: {exc}; falling back to torch.jit.trace")
+            scripted = torch.jit.trace(module, example, strict=False)
+        scripted = scripted.cpu()
 
     metadata: Dict[str, str] = {
         "sample_rate": str(sample_rate),
@@ -239,6 +349,8 @@ def main() -> None:
         "checkpoint_path": str(checkpoint),
         "model_path": str(weights_file),
     }
+    if 'preprocessed_flag' in locals() and preprocessed_flag:
+        metadata["preprocessed"] = "true"
     extra_files = {key: value.encode("utf-8") for key, value in metadata.items()}
 
     # Use the internal name expected by this PyTorch build for extra files

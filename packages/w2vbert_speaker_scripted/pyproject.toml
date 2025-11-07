@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "w2vbert-speaker-scripted"
+version = "0.1.0"
+description = "Lightweight runtime package for the preprocessed TorchScript W2V-BERT speaker encoder"
+readme = "README.md"
+authors = [{name = "Voice Bio Eval Team"}]
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"w2vbert_speaker_scripted" = ["artifacts/*", "artifacts/**"]

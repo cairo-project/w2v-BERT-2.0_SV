@@ -104,13 +104,29 @@ class W2VBERT_SPK_Scripted(torch.nn.Module):
         self,
         *,
         scripted_path: str,
-        feature_extractor_dir: str,
+        feature_extractor_dir: Optional[str] = None,
         device: Optional[Union[str, torch.device]] = None,
     ) -> None:
         super().__init__()
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
+
+        # If no feature_extractor_dir provided, try to use a bundled extractor shipped in the
+        # package `artifacts/feature_extractor` directory. The packaging already includes
+        # `artifacts/**` in package data (see pyproject.toml), so this will work after install.
+        if feature_extractor_dir is None:
+            # Only allow loading the bundled extractor from within the installed package.
+            # Do NOT fall back to repo-level paths; consumers must either install package data
+            # or explicitly pass feature_extractor_dir in dev/in-tree workflows.
+            pkg_candidate = Path(__file__).resolve().parent / "artifacts" / "feature_extractor"
+            if pkg_candidate.exists():
+                feature_extractor_dir = str(pkg_candidate)
+            else:
+                raise FileNotFoundError(
+                    "feature_extractor_dir not provided and bundled extractor not found in package.\n"
+                    f"Expected: {pkg_candidate}. Provide feature_extractor_dir or include the extractor in package data."
+                )
 
         self.feature_extractor = load_feature_extractor(feature_extractor_dir)
         # feature size heuristic

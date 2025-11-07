@@ -23,9 +23,9 @@ if [ ! -f "$ACTIVATE" ]; then
 fi
 
 # Resolve inputs (allow CLI overrides)
-CHECKPOINT="${1:-$REPO_ROOT/../pretrained/audio2vector/ckpts/facebook/w2v-bert-2.0/model_lmft_0.14.pth}"
-MODEL_DIR="${2:-$REPO_ROOT/../pretrained/audio2vector/ckpts/facebook/w2v-bert-2.0}"
-OUTPUT="${3:-$REPO_ROOT/packages/w2vbert_speaker/artifacts/w2vbert_speaker_script.pt}"
+CHECKPOINT="${1:-$REPO_ROOT/../pretrained/w2vbert_speaker_eager/audio2vector/ckpts/facebook/w2v-bert-2.0/model_lmft_0.14.pth}"
+MODEL_DIR="${2:-$REPO_ROOT/../pretrained/w2vbert_speaker_eager/audio2vector/ckpts/facebook/w2v-bert-2.0}"
+OUTPUT="${3:-$REPO_ROOT/../pretrained/w2vbert_speaker_scripted/w2vbert_speaker_script.pt}"
 
 echo "Repository root: $REPO_ROOT"
 echo "Using venv: $VENV_PATH"
